@@ -26,58 +26,30 @@ def esri_url(lat, lon, zoom):
     x, y = lat_lon_to_tile(lat, lon, zoom)
     return f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{y}/{x}"
 
-def fetch_image(lat, lon, max_retries=5, retry_delay=2):
-    """
-    Fetch satellite image from ESRI World Imagery (FREE).
-    Downloads a tile and returns it as PNG bytes.
-    Includes retry logic for network errors.
-    Uses OpenCV for image processing.
-    """
+def fetch_image(lat, lon):
+    """Fetch a single satellite tile from ESRI World Imagery."""
     url = esri_url(lat, lon, cfg.zoom)
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
-    
-    for attempt in range(max_retries):
-        try:
-            r = requests.get(url, timeout=30, headers=headers)
-            if r.status_code == 200:
-                # Decode image bytes to numpy array using OpenCV
-                img_array = np.frombuffer(r.content, dtype=np.uint8)
-                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                
-                if img is None:
-                    print(f"Failed to decode image")
-                    return None
-                
-                # Resize to desired tile size using OpenCV
-                img = cv2.resize(img, (cfg.tile_size, cfg.tile_size), interpolation=cv2.INTER_LANCZOS4)
-                
-                # Encode to PNG bytes using OpenCV
-                success, buffer = cv2.imencode('.png', img)
-                if success:
-                    return buffer.tobytes()
-                return None
-            elif r.status_code == 429:  # Rate limited
-                wait_time = retry_delay * (attempt + 1)
-                time.sleep(wait_time)
-                continue
-            else:
-                print(f"Failed to fetch image: HTTP {r.status_code}")
-                return None
-        except requests.exceptions.Timeout:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-                continue
-        except requests.exceptions.ConnectionError:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-                continue
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                continue
-            print(f"Error fetching image after {max_retries} attempts: {e}")
+    try:
+        r = requests.get(url, timeout=30, headers=headers)
+        if r.status_code != 200:
+            print(f"Failed to fetch image: HTTP {r.status_code}")
+            return None
+
+        img_array = np.frombuffer(r.content, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if img is None:
+            print("Failed to decode image")
+            return None
+
+        img = cv2.resize(img, (cfg.tile_size, cfg.tile_size), interpolation=cv2.INTER_LANCZOS4)
+        success, buffer = cv2.imencode('.png', img)
+        if success:
+            return buffer.tobytes()
+    except Exception as e:
+        print(f"Error fetching image: {e}")
     return None
 
 def download(df, lat_col="lat", lon_col="long", id_col="id"):
@@ -86,7 +58,6 @@ def download(df, lat_col="lat", lon_col="long", id_col="id"):
     paths = {}
     skipped = 0
     downloaded = 0
-    failed_list = []
     
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Downloading satellite tiles"):
         lat, lon, pid = row[lat_col], row[lon_col], row[id_col]
@@ -102,7 +73,6 @@ def download(df, lat_col="lat", lon_col="long", id_col="id"):
         # Fetch from API
         content = fetch_image(lat, lon)
         if content is None:
-            failed_list.append((lat, lon, pid, fpath))
             continue
         
         # Save to disk (cache)
@@ -110,27 +80,9 @@ def download(df, lat_col="lat", lon_col="long", id_col="id"):
             f.write(content)
         paths[pid] = fpath
         downloaded += 1
-        time.sleep(0.1)  # polite pause
+        time.sleep(0.05)  # gentle pacing
     
-    # Retry failed downloads
-    if failed_list:
-        print(f"\nRetrying {len(failed_list)} failed downloads...")
-        time.sleep(2)  # Wait before retrying
-        retry_success = 0
-        
-        for lat, lon, pid, fpath in tqdm(failed_list, desc="Retrying failed"):
-            time.sleep(0.5)  # Slower pace for retries
-            content = fetch_image(lat, lon, max_retries=3, retry_delay=3)
-            if content:
-                with open(fpath, "wb") as f:
-                    f.write(content)
-                paths[pid] = fpath
-                retry_success += 1
-        
-        final_failed = len(failed_list) - retry_success
-        print(f"Retry results: {retry_success} recovered, {final_failed} still failed")
-    else:
-        final_failed = 0
+    final_failed = 0
     
     # Summary
     print(f"\n{'='*50}")
