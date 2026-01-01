@@ -1,0 +1,17 @@
+pandas
+numpy
+geopandas
+scikit-learn
+xgboost
+matplotlib
+seaborn
+requests
+tqdm
+Pillow
+opencv-python
+torch
+torchvision
+torchaudio
+shap
+jupyter
+python-dotenv
