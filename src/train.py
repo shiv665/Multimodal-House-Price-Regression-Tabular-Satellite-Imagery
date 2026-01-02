@@ -111,7 +111,7 @@ def run_gradcam(model, val_ds, output_dir):
     std = np.array([0.229, 0.224, 0.225])
     
     for i in range(min(cfg.grad_cam_samples, len(val_ds))):
-        img, tab, y = val_ds[i]
+        img, tab, y = val_ds[i+50]
         cam = gc(img, tab)
         
         # Convert tensor to numpy and denormalize

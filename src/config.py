@@ -32,7 +32,7 @@ class Config:
     epochs: int = 0
     seed: int = 42
     val_split: float = 0.15
-    grad_cam_samples: int = 6
+    grad_cam_samples: int = 50
     device: str = field(default_factory=get_device)
 
     # tabular features

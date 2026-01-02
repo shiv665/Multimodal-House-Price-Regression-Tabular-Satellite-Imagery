@@ -5,7 +5,6 @@ README/
 # Models
 models/*.pt
 models/*.pkl
-saved_model_of_different_epoch/
 
 # Outputs
 outputs/
