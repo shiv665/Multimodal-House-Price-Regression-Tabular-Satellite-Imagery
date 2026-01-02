@@ -35,7 +35,7 @@ class HouseDataset(Dataset):
     def __len__(self): return len(self.df)
 
     def __getitem__(self, idx):
-        row = self.df.iloc[idx] #here df.iloc is used for precise extraction of data
+        row = self.df.iloc[idx] #here df.iloc is used to get the row at the given index
         pid = row["id"]
         img_path = self.paths.get(pid, None)
         if img_path and os.path.exists(img_path):

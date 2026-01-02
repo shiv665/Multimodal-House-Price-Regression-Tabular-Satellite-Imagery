@@ -17,7 +17,7 @@ def run_tabular_baseline():
     model = XGBRegressor(
         n_estimators=600,
         max_depth=6,
-        learning_rate=0.05,
+        learning_rate=0.01,
         subsample=0.8,
         colsample_bytree=0.8,
         objective="reg:squarederror",
@@ -29,7 +29,7 @@ def run_tabular_baseline():
     print(f"Tabular-only XGB RMSE: {rmse:.2f} | R2: {r2:.3f}")
     return model, scaler
 
-# print(run_tabular_baseline())
+print(run_tabular_baseline())
 # 120484.77 | R2: 0.879 this is my baseline score on tabular data only
 # Now I can try to improve it using satellite images, if that provide me better accuracy and 
 # reduce the error I can be more confident about my model.

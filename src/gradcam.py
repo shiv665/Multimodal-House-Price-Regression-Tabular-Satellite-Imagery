@@ -4,9 +4,21 @@ import cv2
 from src.config import cfg
 
 class GradCAM:
-    def __init__(self, model, target_layer="layer4"):
+    def __init__(self, model, target_layer_idx=-2):
+        """
+        Initialize GradCAM for the HybridMultimodalModel.
+        
+        Args:
+            model: HybridMultimodalModel instance
+            target_layer_idx: Index of the layer in image_encoder to use for CAM
+                             Default -2 targets the last conv block (layer4)
+        """
         self.model = model
-        self.target_layer = dict(self.model.cnn.named_children())[target_layer]
+        # Get the target layer from image_encoder (ResNet without final fc)
+        # image_encoder is Sequential of ResNet layers
+        encoder_children = list(self.model.image_encoder.children())
+        self.target_layer = encoder_children[target_layer_idx]  # layer4 by default
+        
         self.gradients = None
         self.activations = None
         self.target_layer.register_forward_hook(self._forward_hook)

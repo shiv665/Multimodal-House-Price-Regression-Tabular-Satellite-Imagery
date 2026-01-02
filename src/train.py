@@ -1,154 +1,406 @@
-import os, math, argparse
+"""
+House Price Prediction - Hybrid Training Pipeline
+=================================================
+This is the main training script implementing the winning pipeline (R² 0.87):
+1. Train PyTorch CNN+Tabular model
+2. Extract deep features for XGBoost
+3. Train XGBoost on learned representations
+4. Compare and select winner
+5. Generate predictions and Grad-CAM visualizations
+"""
+
+import os
+import math
+import argparse
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import cv2
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import xgboost as xgb
+from tqdm import tqdm
+
 from src.config import cfg
 from src.data_fetcher import download
 from src.datasets import HouseDataset
-from src.model import FusionModel
+from src.model import HybridMultimodalModel
 from src.gradcam import GradCAM
-import matplotlib.pyplot as plt
-from tqdm import tqdm
 
+
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 def rmse(pred, true):
+    """Calculate Root Mean Squared Error."""
     return math.sqrt(mean_squared_error(true, pred))
 
-def train_one_epoch(model, loader, optimizer, criterion):
+
+def train_one_epoch(model, loader, optimizer, criterion, device):
+    """Train the PyTorch model for one epoch."""
     model.train()
-    total = 0
+    total_loss = 0
     for img, tab, y in loader:
-        img, tab, y = img.to(cfg.device), tab.to(cfg.device), y.to(cfg.device)
+        img, tab, y = img.to(device), tab.to(device), y.to(device)
         optimizer.zero_grad()
         pred = model(img, tab)
         loss = criterion(pred, y)
         loss.backward()
         optimizer.step()
-        total += loss.item() * len(y)
-    return total / len(loader.dataset)
+        total_loss += loss.item() * len(y)
+    return total_loss / len(loader.dataset)
+
 
 @torch.no_grad()
-def eval_model(model, loader, criterion):
+def eval_model(model, loader, criterion, device):
+    """Evaluate the PyTorch model."""
     model.eval()
     ys, ps = [], []
-    total = 0
+    total_loss = 0
     for img, tab, y in loader:
-        img, tab, y = img.to(cfg.device), tab.to(cfg.device), y.to(cfg.device)
+        img, tab, y = img.to(device), tab.to(device), y.to(device)
         pred = model(img, tab)
         loss = criterion(pred, y)
-        total += loss.item() * len(y)
-        ys.append(y.cpu().numpy()); ps.append(pred.cpu().numpy())
-    ys = np.concatenate(ys); ps = np.concatenate(ps)
-    return total/len(loader.dataset), rmse(ps, ys), r2_score(ys, ps)
+        total_loss += loss.item() * len(y)
+        ys.append(y.cpu().numpy())
+        ps.append(pred.cpu().numpy())
+    ys = np.concatenate(ys)
+    ps = np.concatenate(ps)
+    return total_loss / len(loader.dataset), rmse(ps, ys), r2_score(ys, ps), mean_absolute_error(ys, ps)
 
-def run_gradcam(model, val_ds):
+
+def extract_features(model, loader, device, include_targets=True):
+    """Extract combined features from the trained model for XGBoost."""
+    model.eval()
+    features_list = []
+    targets_list = []
+    ids_list = []
+    
+    with torch.no_grad():
+        for batch in loader:
+            if include_targets:
+                img, tab, y = batch
+                targets_list.extend(y.numpy())
+            else:
+                img, tab, pid = batch
+                ids_list.extend(pid.tolist() if hasattr(pid, 'tolist') else list(pid))
+            
+            img, tab = img.to(device), tab.to(device)
+            feats = model.get_features_only(img, tab)
+            features_list.append(feats)
+    
+    features = np.vstack(features_list)
+    if include_targets:
+        targets = np.array(targets_list)
+        return features, targets
+    return features, ids_list
+
+
+def run_gradcam(model, val_ds, output_dir):
+    """Generate Grad-CAM visualizations."""
     gc = GradCAM(model)
-    os.makedirs(os.path.join(cfg.output_dir, "gradcam"), exist_ok=True)
+    gradcam_dir = os.path.join(output_dir, "gradcam")
+    os.makedirs(gradcam_dir, exist_ok=True)
+    
     # Denormalization values (ImageNet)
     mean = np.array([0.485, 0.456, 0.406])
     std = np.array([0.229, 0.224, 0.225])
     
     for i in range(min(cfg.grad_cam_samples, len(val_ds))):
         img, tab, y = val_ds[i]
-        cam = gc(img, tab)  # Returns numpy array
+        cam = gc(img, tab)
         
         # Convert tensor to numpy and denormalize
-        orig = img.permute(1, 2, 0).numpy()  # CHW to HWC
-        orig = (orig * std + mean) * 255  # Denormalize
+        orig = img.permute(1, 2, 0).numpy()
+        orig = (orig * std + mean) * 255
         orig = np.clip(orig, 0, 255).astype(np.uint8)
         
         # Resize CAM to match original image size
         cam_resized = cv2.resize(cam, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_LINEAR)
         
-        # Create heatmap using OpenCV colormap
+        # Create heatmap
         heatmap = np.uint8(cam_resized * 255)
         heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
         
-        # Blend original with heatmap
+        # Blend
         overlay = cv2.addWeighted(orig, 0.6, heatmap_color, 0.4, 0)
-        
-        # Save using OpenCV (convert RGB to BGR for saving)
         overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(os.path.join(cfg.output_dir, "gradcam", f"sample_{i}_gt{y:.0f}.png"), overlay_bgr)
+        cv2.imwrite(os.path.join(gradcam_dir, f"sample_{i}_gt{y:.0f}.png"), overlay_bgr)
 
-def main():
-    print("Device from config:", cfg.device)
-    print("Torch CUDA available:", torch.cuda.is_available())
 
+# ==========================================
+# MAIN TRAINING PIPELINE
+# ==========================================
+def main(args):
+    print("=" * 60)
+    print("🏠 HOUSE PRICE PREDICTION - HYBRID TRAINING PIPELINE")
+    print("   PyTorch CNN+Tabular → XGBoost on Deep Features")
+    print("=" * 60)
+    
+    device = cfg.device
+    print(f"\n📍 Device: {device}")
     if torch.cuda.is_available():
-        print("GPU name:", torch.cuda.get_device_name(0))
+        print(f"   GPU: {torch.cuda.get_device_name(0)}")
+    
     os.makedirs(cfg.output_dir, exist_ok=True)
     os.makedirs(cfg.model_dir, exist_ok=True)
 
-    # Load
+    # ==========================================
+    # PHASE 1: LOAD DATA
+    # ==========================================
+    print("\n" + "=" * 60)
+    print("📂 PHASE 1: Loading Data")
+    print("=" * 60)
+    
     train_df = pd.read_excel(cfg.train_xlsx)
     test_df = pd.read_excel(cfg.test_xlsx)
+    print(f"   Train samples: {len(train_df)}")
+    print(f"   Test samples: {len(test_df)}")
 
-    # Fetch images
+    # Fetch/load satellite images
     img_paths = download(pd.concat([train_df, test_df], axis=0))
 
-    # Filter rows with images
+    # Filter rows with valid images
     train_df = train_df[train_df["id"].isin(img_paths.keys())]
     test_df = test_df[test_df["id"].isin(img_paths.keys())]
+    print(f"   Train samples with images: {len(train_df)}")
+    print(f"   Test samples with images: {len(test_df)}")
 
-    # Scale
+    # Scale tabular features
     scaler = StandardScaler()
     scaler.fit(train_df[cfg.tab_feats].astype(float))
 
+    # Split train into train/val
     tr_df, val_df = train_test_split(train_df, test_size=cfg.val_split, random_state=cfg.seed)
+    print(f"   Training set: {len(tr_df)}")
+    print(f"   Validation set: {len(val_df)}")
 
+    # Create datasets
     tr_ds = HouseDataset(tr_df, img_paths, scaler, train=True)
     val_ds = HouseDataset(val_df, img_paths, scaler, train=True)
     te_ds = HouseDataset(test_df, img_paths, scaler, train=False)
 
+    # Create dataloaders
     tr_loader = DataLoader(tr_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
-    te_loader  = DataLoader(te_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
+    te_loader = DataLoader(te_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers)
 
-    model = FusionModel(tab_in=len(cfg.tab_feats)).to(cfg.device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    # ==========================================
+    # PHASE 2: TRAIN PYTORCH MODEL
+    # ==========================================
+    print("\n" + "=" * 60)
+    print("🧠 PHASE 2: Training Neural Network (CNN + Tabular)")
+    print("=" * 60)
+    
+    model = HybridMultimodalModel(tabular_input_dim=len(cfg.tab_feats)).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     criterion = nn.MSELoss()
-
+    
+    # Checkpoint paths
+    best_model_path = os.path.join(cfg.model_dir, "best_model.pt")
+    last_model_path = os.path.join(cfg.model_dir, "last_model.pt")
+    
+    start_epoch = 0
     best_rmse = float("inf")
-    for epoch in tqdm(range(cfg.epochs)):
-        tr_loss = train_one_epoch(model, tr_loader, optimizer, criterion)
-        val_loss, val_rmse, val_r2 = eval_model(model, val_loader, criterion)
-        print(f"Epoch {epoch+1}/{cfg.epochs} | tr_loss {tr_loss:.4f} | val_loss {val_loss:.4f} | val_RMSE {val_rmse:.2f} | val_R2 {val_r2:.3f}")
+    best_r2 = float("-inf")
+    best_epoch = 0
+
+    # Always start fresh; comparison.py handles loading saved models.
+    print("\n🆕 Starting fresh training (no checkpoint loading)...")
+    
+    # Training loop
+    epochs_to_train = args.epochs if args.epochs else cfg.epochs
+    total_epochs = start_epoch + epochs_to_train
+    print(f"   Training from epoch {start_epoch + 1} to {total_epochs}")
+
+    for epoch in tqdm(range(epochs_to_train), desc="Training PyTorch"):
+        current_epoch = start_epoch + epoch + 1
+        tr_loss = train_one_epoch(model, tr_loader, optimizer, criterion, device)
+        val_loss, val_rmse, val_r2, val_mae = eval_model(model, val_loader, criterion, device)
+        
+        print(f"   Epoch {current_epoch}/{total_epochs} | "
+              f"Train Loss: {tr_loss:.4f} | "
+              f"Val RMSE: ${val_rmse:,.0f} | "
+              f"Val R²: {val_r2:.4f}")
+        
+        # Save last checkpoint
+        torch.save({
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": current_epoch,
+            "best_rmse": best_rmse,
+            "best_r2": best_r2,
+            "best_epoch": best_epoch,
+            "scaler_mean": scaler.mean_,
+            "scaler_scale": scaler.scale_,
+        }, last_model_path)
+        
+        # Save best model
         if val_rmse < best_rmse:
             best_rmse = val_rmse
+            best_r2 = val_r2
+            best_epoch = current_epoch
             torch.save({
                 "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": current_epoch,
+                "best_rmse": best_rmse,
+                "best_r2": best_r2,
+                "best_epoch": best_epoch,
                 "scaler_mean": scaler.mean_,
                 "scaler_scale": scaler.scale_,
-            }, os.path.join(cfg.model_dir, "best_model.pt"))
+            }, best_model_path)
+            print(f"   ✅ New best model saved! (R²: {val_r2:.4f})")
+    
+    print(f"\n✅ Best PyTorch Model: Epoch {best_epoch} with Val RMSE: ${best_rmse:,.0f}")
 
-    # reload best
-    ckpt = torch.load(os.path.join(cfg.model_dir, "best_model.pt"), map_location=cfg.device)
-    model.load_state_dict(ckpt["model"])
+    # ==========================================
+    # PHASE 3: TRAIN XGBOOST ON DEEP FEATURES
+    # ==========================================
+    print("\n" + "=" * 60)
+    print("🔬 PHASE 3: Extracting Deep Features for XGBoost")
+    print("=" * 60)
+    
+    X_train, y_train = extract_features(model, tr_loader, device, include_targets=True)
+    X_val, y_val = extract_features(model, val_loader, device, include_targets=True)
+    
+    print(f"   Training features shape: {X_train.shape}")
+    print(f"   Validation features shape: {X_val.shape}")
+    print(f"   Feature dimension: {X_train.shape[1]} (256 visual + 64 tabular)")
+    
+    print("\n" + "=" * 60)
+    print("🌲 Training XGBoost on Deep Features")
+    print("=" * 60)
+    
+    xgb_model = xgb.XGBRegressor(
+        n_estimators=200,
+        learning_rate=0.1,
+        max_depth=6,
+        min_child_weight=1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=cfg.seed,
+        n_jobs=-1
+    )
+    
+    xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    print("✅ XGBoost Training Complete")
+    
+    # ==========================================
+    # PHASE 4: COMPARE MODELS
+    # ==========================================
+    print("\n" + "=" * 60)
+    print("🏆 PHASE 4: MODEL COMPARISON")
+    print("=" * 60)
+    
+    # PyTorch predictions on validation
+    model.eval()
+    y_pred_pt = []
+    y_true = []
+    with torch.no_grad():
+        for img, tab, y in val_loader:
+            img, tab = img.to(device), tab.to(device)
+            pred = model(img, tab)
+            y_pred_pt.extend(pred.cpu().numpy())
+            y_true.extend(y.numpy())
+    y_pred_pt = np.array(y_pred_pt)
+    y_true = np.array(y_true)
+    
+    # PyTorch metrics
+    pt_rmse = rmse(y_pred_pt, y_true)
+    pt_r2 = r2_score(y_true, y_pred_pt)
+    pt_mae = mean_absolute_error(y_true, y_pred_pt)
+    
+    # XGBoost predictions
+    y_pred_xgb = xgb_model.predict(X_val)
+    xgb_rmse_val = rmse(y_pred_xgb, y_val)
+    xgb_r2 = r2_score(y_val, y_pred_xgb)
+    xgb_mae = mean_absolute_error(y_val, y_pred_xgb)
+    
+    # Print comparison
+    print("\n" + "-" * 60)
+    print(f"{'Model':<30} {'RMSE':>12} {'R²':>10} {'MAE':>12}")
+    print("-" * 60)
+    print(f"{'PyTorch (CNN + Tabular)':<30} ${pt_rmse:>10,.0f} {pt_r2:>10.4f} ${pt_mae:>10,.0f}")
+    print(f"{'XGBoost (on Deep Features)':<30} ${xgb_rmse_val:>10,.0f} {xgb_r2:>10.4f} ${xgb_mae:>10,.0f}")
+    print("-" * 60)
+    
+    # Declare winner
+    if xgb_r2 > pt_r2:
+        print("\n🏆 WINNER: XGBoost on Deep Features!")
+        winner = "xgboost"
+    else:
+        print("\n🏆 WINNER: PyTorch End-to-End Model!")
+        winner = "pytorch"
 
-    # Predict test
-    preds, ids = [], []
+    # ==========================================
+    # PHASE 5: GENERATE TEST PREDICTIONS
+    # ==========================================
+    print("\n" + "=" * 60)
+    print("📊 PHASE 5: Generating Test Predictions")
+    print("=" * 60)
+    
+    # Extract test features
+    X_test, test_ids = extract_features(model, te_loader, device, include_targets=False)
+    
+    # PyTorch predictions on test
+    pt_preds = []
     model.eval()
     with torch.no_grad():
         for img, tab, pid in te_loader:
-            img, tab = img.to(cfg.device), tab.to(cfg.device)
+            img, tab = img.to(device), tab.to(device)
             pred = model(img, tab).cpu().numpy()
-            preds.extend(pred.tolist())
-            ids.extend(pid.tolist())
-    sub = pd.DataFrame({"id": ids, "predicted_price": preds})
-    sub.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
-    print("Saved outputs/submission.csv")
+            pt_preds.extend(pred.tolist())
+    
+    # XGBoost predictions on test
+    xgb_preds = xgb_model.predict(X_test)
+    
+    # Save submissions
+    sub_pt = pd.DataFrame({"id": test_ids, "predicted_price": pt_preds})
+    sub_pt.to_csv(os.path.join(cfg.output_dir, "submission_pytorch.csv"), index=False)
+    print(f"   Saved: outputs/submission_pytorch.csv")
+    
+    sub_xgb = pd.DataFrame({"id": test_ids, "predicted_price": xgb_preds})
+    sub_xgb.to_csv(os.path.join(cfg.output_dir, "submission_xgboost.csv"), index=False)
+    print(f"   Saved: outputs/submission_xgboost.csv")
+    
+    # Save winner's submission
+    if winner == "xgboost":
+        sub_xgb.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
+    else:
+        sub_pt.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
+    print(f"   Saved: outputs/submission.csv (using {winner})")
 
-    # Grad-CAM
-    run_gradcam(model, val_ds)
+    # ==========================================
+    # PHASE 6: GRAD-CAM VISUALIZATION
+    # ==========================================
+    print("\n" + "=" * 60)
+    print("🔥 PHASE 6: Grad-CAM Visualization")
+    print("=" * 60)
+    run_gradcam(model, val_ds, cfg.output_dir)
+    print("   Saved Grad-CAM visualizations to outputs/gradcam/")
+    
+    print("\n" + "=" * 60)
+    print("✅ TRAINING COMPLETE!")
+    print(f"   Winner: {winner.upper()} (R²: {xgb_r2:.4f if winner == 'xgboost' else pt_r2:.4f})")
+    print("=" * 60)
+    
+    return winner, {
+        "pytorch": {"rmse": pt_rmse, "r2": pt_r2, "mae": pt_mae},
+        "xgboost": {"rmse": xgb_rmse_val, "r2": xgb_r2, "mae": xgb_mae}
+    }
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.parse_args()
-    main()
+    parser = argparse.ArgumentParser(description="Train House Price Prediction Model")
+    parser.add_argument("--epochs", type=int, default=None, 
+                        help="Override number of epochs to train")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Start fresh training, ignore existing checkpoints")
+    args = parser.parse_args()
+    main(args)

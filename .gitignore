@@ -1,3 +1,18 @@
 .venv/
 __pycache__/
 satellite/
+README/
+# Models
+models/*.pt
+models/*.pkl
+saved_model_of_different_epoch/
+
+# Outputs
+outputs/
+!outputs/.gitkeep
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Env
+.env

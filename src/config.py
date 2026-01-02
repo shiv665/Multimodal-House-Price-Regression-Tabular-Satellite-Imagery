@@ -17,10 +17,11 @@ class Config:
     image_dir: str = "data/satellite"
     output_dir: str = "outputs"
     model_dir: str = "models"
-
+    model_test: str = "saved_model_of_different_epoch"
     # ESRI World Imagery (FREE - no API key needed)
     zoom: int = 18
     tile_size: int = 256
+    
 
     # modeling
     img_size: int = 224
@@ -28,7 +29,7 @@ class Config:
     num_workers: int = 4
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    epochs: int = 15
+    epochs: int = 0
     seed: int = 42
     val_split: float = 0.15
     grad_cam_samples: int = 6
