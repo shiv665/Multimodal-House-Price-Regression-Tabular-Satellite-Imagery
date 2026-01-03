@@ -29,10 +29,10 @@ class Config:
     num_workers: int = 4
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    epochs: int = 0
+    epochs: int = 15
     seed: int = 42
     val_split: float = 0.15
-    grad_cam_samples: int = 50
+    grad_cam_samples: int = 500
     device: str = field(default_factory=get_device)
 
     # tabular features

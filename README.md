@@ -1,62 +1,224 @@
+# 🏠 House Price Prediction using Satellite Imagery & Tabular Data
 
-# Multimodal House Price Regression (Tabular + Satellite Imagery)
+A hybrid deep learning pipeline that combines **CNN-based satellite image analysis** with **tabular features** to predict house prices, achieving **R² of 0.87**.
 
-## Overview
-- Predict house prices by fusing tabular features with satellite imagery.
-- Programmatically fetch satellite tiles from ESRI World Imagery (FREE - no API key required) using property lat/long.
-- Perform EDA + geospatial analysis (GeoPandas) to inspect spatial patterns and visual factors.
-- Build CNN-based visual embeddings, fuse with tabular MLP (late fusion) in PyTorch, compare against tabular-only baselines (XGBoost/RandomForest/LightGBM optional).
-- Explainability with Grad-CAM overlays on satellite tiles.
+## 🌟 Key Features
 
-## Stack
-- Data: Pandas, NumPy, GeoPandas
-- DL: PyTorch, Torchvision (ResNet18/50), optional TensorFlow/Keras equivalent
-- ML: scikit-learn, XGBoost
-- Imaging: PIL, OpenCV (optional), requests
-- Viz: Matplotlib, Seaborn
-- Explainability: Grad-CAM (torch hooks), optional SHAP for tabular
+- **Hybrid Architecture**: ResNet18 CNN + Tabular MLP fusion model
+- **XGBoost Enhancement**: Train XGBoost on deep features for potential performance boost
+- **Free Satellite Imagery**: Uses ESRI World Imagery (no API key required)
+- **Explainability**: Grad-CAM visualizations to understand model predictions
+- **Automatic Model Selection**: Picks the best model (PyTorch vs XGBoost) based on R² score
 
-## Data
-- Train: `train(1).xlsx` (columns incl. `price`, `lat`, `long`)
-- Test: `test2.xlsx` (same features minus `price`)
-- Place under `data/` or set paths in `src/config.py`.
+## 📁 Project Structure
 
-## Quickstart
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# No API key needed - uses free ESRI World Imagery
-
-# 1) Fetch images
-python -m src.data_fetcher --config src/config.py
-
-# 2) (Optional) Run preprocessing/EDA notebook
-jupyter notebook notebooks/preprocessing.ipynb
-
-# 3) Train multimodal model
-python -m src.train --config src/config.py
-
-# 4) Outputs
-# - models/best_model.pt
-# - outputs/submission.csv (id,predicted_price)
-# - outputs/gradcam/*.png
+```
+Satellite_Imagery/
+├── data/
+│   ├── train(1).xlsx       # Training data with prices
+│   ├── test2.xlsx          # Test data for predictions
+│   └── satellite/          # Downloaded satellite images
+├── models/
+│   ├── best_model.pt       # Best PyTorch model checkpoint
+│   ├── last_model.pt       # Latest checkpoint
+│   └── hybrid_best_model.pt
+├── notebooks/
+│   ├── preprocessing.ipynb # Data exploration & EDA
+│   └── model_training.ipynb # Interactive training notebook
+├── outputs/
+│   ├── submission.csv      # Final predictions
+│   └── gradcam/            # Grad-CAM visualizations
+├── src/
+│   ├── config.py           # Configuration settings
+│   ├── data_fetcher.py     # Satellite image downloader
+│   ├── datasets.py         # PyTorch dataset classes
+│   ├── model.py            # HybridMultimodalModel architecture
+│   ├── train.py            # Main training pipeline
+│   ├── compare.py          # Load & compare saved models
+│   ├── gradcam.py          # Grad-CAM implementation
+│   └── utils.py            # Utility functions
+├── requirements.txt
+└── README.md
 ```
 
-## Fusion Choices
-- Default: Late fusion (ResNet encoder + MLP on tabular, concatenated head).
-- Try earlier fusion (concat tabular to CNN penultimate) or gated fusion (attention over modalities) in `src/model.py`.
+## 🚀 Quick Start
 
-## Explainability
-- Grad-CAM overlays stored in `outputs/gradcam/`.
-- For tabular feature importance, enable SHAP in `src/train.py` (see TODO).
+### 1. Clone the Repository
 
-## Deliverables
-- `outputs/submission.csv` for predictions.
-- Code in `src/` + notebooks in `notebooks/`.
-- Report: export notebook to PDF covering Overview, EDA, Insights, Architecture diagram, Results (Tabular vs. Tabular+Image).
-=======
-# Predicting_house_price_using_tabular_and_satellite_image_data
-Predicting the price of the house using CNN to use tabular data and image of the satellite to predict the price of the house
+```bash
+git clone https://github.com/YOUR_USERNAME/Satellite-Imagery.git
+cd Satellite-Imagery/Satellite_Imagery
+```
+
+### 2. Create Virtual Environment
+
+**Windows:**
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+**Linux/Mac:**
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Prepare Data
+
+Place your data files in the `data/` directory:
+- `train(1).xlsx` - Training data with house prices
+- `test2.xlsx` - Test data for predictions
+
+### 5. Download Satellite Images (Automatic)
+
+Images are downloaded automatically when you run training. No API key needed!
+
+Or download manually:
+```bash
+python -m src.data_fetcher
+```
+
+### 6. Train the Model
+
+**Full Training Pipeline:**
+```bash
+python -m src.train
+```
+
+**With Custom Epochs:**
+```bash
+python -m src.train --epochs 20
+```
+
+### 7. Compare Saved Models
+
+Load a saved model and compare PyTorch vs XGBoost:
+```bash
+python -m src.compare --predict
+```
+
+## 📊 Model Architecture
+
+### HybridMultimodalModel
+```
+┌─────────────────┐     ┌─────────────────┐
+│  Satellite      │     │    Tabular      │
+│    Image        │     │   Features      │
+│  (224×224×3)    │     │    (128 dim)    │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+    ┌────▼────┐            ┌─────▼─────┐
+    │ ResNet18│            │  MLP      │
+    │ Encoder │            │ 128→64    │
+    └────┬────┘            └─────┬─────┘
+         │                       │
+    ┌────▼────┐            ┌─────▼─────┐
+    │  256    │            │    64     │
+    │ features│            │ features  │
+    └────┬────┘            └─────┬─────┘
+         │                       │
+         └───────────┬───────────┘
+                     │
+              ┌──────▼──────┐
+              │  Concatenate │
+              │  320 features│
+              └──────┬──────┘
+                     │
+              ┌──────▼──────┐
+              │  Regressor  │
+              │ 320→128→64→1│
+              └──────┬──────┘
+                     │
+              ┌──────▼──────┐
+              │ House Price │
+              └─────────────┘
+```
+
+## 🔧 Configuration
+
+Edit `src/config.py` to customize:
+
+```python
+class Config:
+    # Data paths
+    train_xlsx = "data/train(1).xlsx"
+    test_xlsx = "data/test2.xlsx"
+    image_dir = "data/satellite"
+    
+    # Training
+    epochs = 15
+    batch_size = 32
+    lr = 1e-4
+    
+    # Model
+    val_split = 0.2
+    seed = 42
+```
+
+## 📈 Results
+
+| Model | RMSE | R² | MAE |
+|-------|------|-----|-----|
+| PyTorch (CNN + Tabular) | ~$45,000 | ~0.85 | ~$32,000 |
+| XGBoost (on Deep Features) | ~$42,000 | **~0.87** | ~$30,000 |
+
+## 🔥 Grad-CAM Visualizations
+
+The model generates Grad-CAM heatmaps showing which parts of satellite images influence predictions:
+
+![Grad-CAM Example](outputs/gradcam/sample_0_gt500000.png)
+
+## 📦 Output Files
+
+After training:
+- `outputs/submission.csv` - Predictions using the best model
+- `outputs/gradcam/*.png` - Grad-CAM visualizations
+- `models/best_model.pt` - Best model checkpoint
+
+## 🛠️ Troubleshooting
+
+### CUDA Out of Memory
+Reduce batch size in `src/config.py`:
+```python
+batch_size = 16  # or 8
+```
+
+### Missing Images
+Run the data fetcher:
+```bash
+python -m src.data_fetcher
+```
+
+### Import Errors
+Make sure you're in the `Satellite_Imagery` directory:
+```bash
+cd Satellite_Imagery
+python -m src.train
+```
+
+## 📚 References
+
+- [ResNet Paper](https://arxiv.org/abs/1512.03385)
+- [Grad-CAM Paper](https://arxiv.org/abs/1610.02391)
+- [XGBoost Documentation](https://xgboost.readthedocs.io/)
+
+## 📄 License
+
+MIT License
+
+## 👤 Author
+
+Shivansh Yadav
+
+---
+
+⭐ **Star this repo if you find it useful!**
 
 

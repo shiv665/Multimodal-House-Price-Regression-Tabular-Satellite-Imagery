@@ -24,6 +24,7 @@ from src.config import cfg
 from src.data_fetcher import download
 from src.datasets import HouseDataset
 from src.model import HybridMultimodalModel
+from src.train import run_gradcam
 
 
 def rmse(pred, true):
@@ -152,7 +153,8 @@ def main(args):
     print("📦 Loading PyTorch Model")
     print("=" * 70)
     
-    model_path = os.path.join(cfg.model_test, "hybrid_best_model_2.pt")
+    # since i have saved the model to model_test directory of model 1 and model 2, so change accordingly and see this
+    model_path = os.path.join(cfg.model_test, "hybrid_best_model_1.pt")
     
     if not os.path.exists(model_path):
         print(f"\n❌ Model not found: {model_path}")
@@ -216,12 +218,24 @@ def main(args):
     print("📊 Evaluating Models on Validation Set")
     print("=" * 70)
     
-    # PyTorch evaluation
-    print("\n   Evaluating PyTorch model...")
+    # PyTorch TRAINING evaluation
+    print("\n   Evaluating PyTorch model on training set...")
+    pt_train_metrics = evaluate_pytorch(model, tr_loader, device)
+    
+    # PyTorch VALIDATION evaluation
+    print("   Evaluating PyTorch model on validation set...")
     pt_metrics = evaluate_pytorch(model, val_loader, device)
     
-    # XGBoost evaluation
-    print("   Evaluating XGBoost model...")
+    # XGBoost TRAINING evaluation
+    print("   Evaluating XGBoost model on training set...")
+    xgb_train_preds = xgb_model.predict(X_train)
+    xgb_train_metrics = {
+        "rmse": rmse(xgb_train_preds, y_train),
+        "r2": r2_score(y_train, xgb_train_preds),
+    }
+    
+    # XGBoost VALIDATION evaluation
+    print("   Evaluating XGBoost model on validation set...")
     xgb_preds = xgb_model.predict(X_val)
     xgb_metrics = {
         "rmse": rmse(xgb_preds, y_val),
@@ -234,16 +248,16 @@ def main(args):
     # ==========================================
     # PRINT COMPARISON TABLE
     # ==========================================
-    print("\n" + "=" * 70)
-    print("🏆 MODEL COMPARISON RESULTS (Validation Set)")
-    print("=" * 70)
+    print("\n" + "=" * 90)
+    print("🏆 MODEL COMPARISON RESULTS")
+    print("=" * 90)
     
-    print("\n" + "-" * 70)
-    print(f"{'Model':<30} {'RMSE':>12} {'R²':>10} {'MAE':>12}")
-    print("-" * 70)
-    print(f"{'PyTorch (CNN + Tabular)':<30} {pt_metrics['rmse']:>10,.0f} {pt_metrics['r2']:>10.4f} {pt_metrics['mae']:>10,.0f}")
-    print(f"{'XGBoost (on Deep Features)':<30} {xgb_metrics['rmse']:>10,.0f} {xgb_metrics['r2']:>10.4f} {xgb_metrics['mae']:>10,.0f}")
-    print("-" * 70)
+    print("\n" + "-" * 90)
+    print(f"{'Model':<30} {'Train RMSE':>12} {'Train R²':>10} {'Val RMSE':>12} {'Val R²':>10}")
+    print("-" * 90)
+    print(f"{'PyTorch (CNN + Tabular)':<30} {pt_train_metrics['rmse']:>10,.0f} {pt_train_metrics['r2']:>10.4f} {pt_metrics['rmse']:>10,.0f} {pt_metrics['r2']:>10.4f}")
+    print(f"{'XGBoost (on Deep Features)':<30} {xgb_train_metrics['rmse']:>10,.0f} {xgb_train_metrics['r2']:>10.4f} {xgb_metrics['rmse']:>10,.0f} {xgb_metrics['r2']:>10.4f}")
+    print("-" * 90)
     
     # Declare winner
     if xgb_metrics['r2'] > pt_metrics['r2']:
@@ -267,37 +281,37 @@ def main(args):
         print("   Extracting test features...")
         X_test, test_ids = extract_features(model, te_loader, device, include_targets=False)
         
-        # PyTorch predictions
-        pt_preds = []
-        model.eval()
-        with torch.no_grad():
-            for img, tab, pid in te_loader:
-                img, tab = img.to(device), tab.to(device)
-                pred = model(img, tab).cpu().numpy()
-                pt_preds.extend(pred.tolist())
-        
-        # XGBoost predictions
-        xgb_test_preds = xgb_model.predict(X_test)
-        
-        # Save predictions
-        sub_pt = pd.DataFrame({"id": test_ids, "predicted_price": pt_preds})
-        sub_pt.to_csv(os.path.join(cfg.output_dir, "submission_pytorch.csv"), index=False)
-        print(f"   Saved: outputs/submission_pytorch.csv")
-        
-        sub_xgb = pd.DataFrame({"id": test_ids, "predicted_price": xgb_test_preds})
-        sub_xgb.to_csv(os.path.join(cfg.output_dir, "submission_xgboost.csv"), index=False)
-        print(f"   Saved: outputs/submission_xgboost.csv")
-        
-        # Save winner's submission
-        if winner == "xgboost":
-            sub_xgb.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
+        # Generate predictions from the model with best R² score
+        if xgb_metrics['r2'] > pt_metrics['r2']:
+            # XGBoost has better R² - use XGBoost predictions
+            best_preds = xgb_model.predict(X_test)
+            best_model_name = "XGBoost"
+            best_r2_score = xgb_metrics['r2']
         else:
-            sub_pt.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
-        print(f"   Saved: outputs/submission.csv (using {winner})")
+            # PyTorch has better R² - use PyTorch predictions
+            best_preds = []
+            model.eval()
+            with torch.no_grad():
+                for img, tab, pid in te_loader:
+                    img, tab = img.to(device), tab.to(device)
+                    pred = model(img, tab).cpu().numpy()
+                    best_preds.extend(pred.tolist())
+            best_model_name = "PyTorch"
+            best_r2_score = pt_metrics['r2']
+        
+        # Save only the best model's submission
+        submission = pd.DataFrame({"id": test_ids, "predicted_price": best_preds})
+        submission.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
+        print(f"   Saved: outputs/submission.csv (using {best_model_name} with R²: {best_r2_score:.4f})")
 
     # ==========================================
-    # DETAILED ANALYSIS
+    # GRAD-CAM VISUALIZATION
     # ==========================================
+    print("\n" + "=" * 70)
+    print("🔥 Grad-CAM Visualization")
+    print("=" * 70)
+    run_gradcam(model, val_ds, cfg.output_dir)
+    print("   Saved Grad-CAM visualizations to outputs/gradcam/")
     
     print("\n" + "=" * 70)
     print("✅ COMPARISON COMPLETE!")

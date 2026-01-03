@@ -29,7 +29,7 @@ from src.config import cfg
 from src.data_fetcher import download
 from src.datasets import HouseDataset
 from src.model import HybridMultimodalModel
-from src.gradcam import GradCAM
+from src.gradcam import GradCAM, create_enhanced_overlay
 
 
 # ==========================================
@@ -101,8 +101,8 @@ def extract_features(model, loader, device, include_targets=True):
 
 
 def run_gradcam(model, val_ds, output_dir):
-    """Generate Grad-CAM visualizations."""
-    gc = GradCAM(model)
+    """Generate Enhanced Grad-CAM++ visualizations with better contrast."""
+    gc = GradCAM(model, use_gradcam_pp=True)
     gradcam_dir = os.path.join(output_dir, "gradcam")
     os.makedirs(gradcam_dir, exist_ok=True)
     
@@ -111,8 +111,10 @@ def run_gradcam(model, val_ds, output_dir):
     std = np.array([0.229, 0.224, 0.225])
     
     for i in range(min(cfg.grad_cam_samples, len(val_ds))):
-        img, tab, y = val_ds[i+50]
-        cam = gc(img, tab)
+        img, tab, y = val_ds[i+500]
+        
+        # Generate enhanced CAM with multi-scale fusion and contrast enhancement
+        cam = gc(img, tab, smooth=True, multi_scale=True, enhance_contrast=True)
         
         # Convert tensor to numpy and denormalize
         orig = img.permute(1, 2, 0).numpy()
@@ -122,15 +124,11 @@ def run_gradcam(model, val_ds, output_dir):
         # Resize CAM to match original image size
         cam_resized = cv2.resize(cam, (orig.shape[1], orig.shape[0]), interpolation=cv2.INTER_LINEAR)
         
-        # Create heatmap
-        heatmap = np.uint8(cam_resized * 255)
-        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-        heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-        
-        # Blend
-        overlay = cv2.addWeighted(orig, 0.6, heatmap_color, 0.4, 0)
+        # Create enhanced overlay with higher alpha and thresholding
+        overlay = create_enhanced_overlay(orig, cam_resized, alpha=0.6, threshold=0.25)
         overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
         cv2.imwrite(os.path.join(gradcam_dir, f"sample_{i}_gt{y:.0f}.png"), overlay_bgr)
+        
 
 
 # ==========================================
@@ -200,7 +198,6 @@ def main(args):
     model = HybridMultimodalModel(tabular_input_dim=len(cfg.tab_feats)).to(device)
     optimizer = optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     criterion = nn.MSELoss()
-    
     # Checkpoint paths
     best_model_path = os.path.join(cfg.model_dir, "best_model.pt")
     last_model_path = os.path.join(cfg.model_dir, "last_model.pt")
@@ -221,24 +218,15 @@ def main(args):
     for epoch in tqdm(range(epochs_to_train), desc="Training PyTorch"):
         current_epoch = start_epoch + epoch + 1
         tr_loss = train_one_epoch(model, tr_loader, optimizer, criterion, device)
+        
+        # Evaluate on training set
+        tr_eval_loss, tr_rmse, tr_r2, tr_mae = eval_model(model, tr_loader, criterion, device)
+        # Evaluate on validation set
         val_loss, val_rmse, val_r2, val_mae = eval_model(model, val_loader, criterion, device)
         
         print(f"   Epoch {current_epoch}/{total_epochs} | "
-              f"Train Loss: {tr_loss:.4f} | "
-              f"Val RMSE: ${val_rmse:,.0f} | "
-              f"Val R²: {val_r2:.4f}")
-        
-        # Save last checkpoint
-        torch.save({
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "epoch": current_epoch,
-            "best_rmse": best_rmse,
-            "best_r2": best_r2,
-            "best_epoch": best_epoch,
-            "scaler_mean": scaler.mean_,
-            "scaler_scale": scaler.scale_,
-        }, last_model_path)
+              f"Train RMSE: {tr_rmse:,.0f} | Train R²: {tr_r2:.4f} | "
+              f"Val RMSE: {val_rmse:,.0f} | Val R²: {val_r2:.4f}")
         
         # Save best model
         if val_rmse < best_rmse:
@@ -257,8 +245,14 @@ def main(args):
             }, best_model_path)
             print(f"   ✅ New best model saved! (R²: {val_r2:.4f})")
     
-    print(f"\n✅ Best PyTorch Model: Epoch {best_epoch} with Val RMSE: ${best_rmse:,.0f}")
+    print(f"\n✅ Best PyTorch Model: Epoch {best_epoch} with Val RMSE: {best_rmse:,.0f}")
 
+    # Load best model weights for subsequent computations
+    print("\n📥 Loading best model checkpoint for evaluation...")
+    checkpoint = torch.load(best_model_path, map_location=device)
+    model.load_state_dict(checkpoint["model"])
+    tr_eval_loss, tr_rmse, tr_r2, tr_mae = eval_model(model, tr_loader, criterion, device)
+    print(f"   Loaded model Val R²: {tr_r2:.4f}, RMSE: {tr_rmse:,.0f}")
     # ==========================================
     # PHASE 3: TRAIN XGBOOST ON DEEP FEATURES
     # ==========================================
@@ -298,37 +292,28 @@ def main(args):
     print("🏆 PHASE 4: MODEL COMPARISON")
     print("=" * 60)
     
-    # PyTorch predictions on validation
-    model.eval()
-    y_pred_pt = []
-    y_true = []
-    with torch.no_grad():
-        for img, tab, y in val_loader:
-            img, tab = img.to(device), tab.to(device)
-            pred = model(img, tab)
-            y_pred_pt.extend(pred.cpu().numpy())
-            y_true.extend(y.numpy())
-    y_pred_pt = np.array(y_pred_pt)
-    y_true = np.array(y_true)
+    # PyTorch metrics (using eval_model function)
+    _, pt_rmse_train, pt_r2_train, _ = eval_model(model, tr_loader, criterion, device)
+    _, pt_rmse, pt_r2, pt_mae = eval_model(model, val_loader, criterion, device)
     
-    # PyTorch metrics
-    pt_rmse = rmse(y_pred_pt, y_true)
-    pt_r2 = r2_score(y_true, y_pred_pt)
-    pt_mae = mean_absolute_error(y_true, y_pred_pt)
+    # XGBoost TRAINING metrics
+    y_pred_xgb_train = xgb_model.predict(X_train)
+    xgb_rmse_train = rmse(y_pred_xgb_train, y_train)
+    xgb_r2_train = r2_score(y_train, y_pred_xgb_train)
     
-    # XGBoost predictions
+    # XGBoost VALIDATION metrics
     y_pred_xgb = xgb_model.predict(X_val)
     xgb_rmse_val = rmse(y_pred_xgb, y_val)
     xgb_r2 = r2_score(y_val, y_pred_xgb)
     xgb_mae = mean_absolute_error(y_val, y_pred_xgb)
     
     # Print comparison
-    print("\n" + "-" * 60)
-    print(f"{'Model':<30} {'RMSE':>12} {'R²':>10} {'MAE':>12}")
-    print("-" * 60)
-    print(f"{'PyTorch (CNN + Tabular)':<30} ${pt_rmse:>10,.0f} {pt_r2:>10.4f} ${pt_mae:>10,.0f}")
-    print(f"{'XGBoost (on Deep Features)':<30} ${xgb_rmse_val:>10,.0f} {xgb_r2:>10.4f} ${xgb_mae:>10,.0f}")
-    print("-" * 60)
+    print("\n" + "-" * 80)
+    print(f"{'Model':<30} {'Train RMSE':>12} {'Train R²':>10} {'Val RMSE':>12} {'Val R²':>10}")
+    print("-" * 80)
+    print(f"{'PyTorch (CNN + Tabular)':<30} {pt_rmse_train:>10,.0f} {pt_r2_train:>10.4f} {pt_rmse:>10,.0f} {pt_r2:>10.4f}")
+    print(f"{'XGBoost (on Deep Features)':<30} {xgb_rmse_train:>10,.0f} {xgb_r2_train:>10.4f} {xgb_rmse_val:>10,.0f} {xgb_r2:>10.4f}")
+    print("-" * 80)
     
     # Declare winner
     if xgb_r2 > pt_r2:
@@ -348,33 +333,28 @@ def main(args):
     # Extract test features
     X_test, test_ids = extract_features(model, te_loader, device, include_targets=False)
     
-    # PyTorch predictions on test
-    pt_preds = []
-    model.eval()
-    with torch.no_grad():
-        for img, tab, pid in te_loader:
-            img, tab = img.to(device), tab.to(device)
-            pred = model(img, tab).cpu().numpy()
-            pt_preds.extend(pred.tolist())
-    
-    # XGBoost predictions on test
-    xgb_preds = xgb_model.predict(X_test)
-    
-    # Save submissions
-    sub_pt = pd.DataFrame({"id": test_ids, "predicted_price": pt_preds})
-    sub_pt.to_csv(os.path.join(cfg.output_dir, "submission_pytorch.csv"), index=False)
-    print(f"   Saved: outputs/submission_pytorch.csv")
-    
-    sub_xgb = pd.DataFrame({"id": test_ids, "predicted_price": xgb_preds})
-    sub_xgb.to_csv(os.path.join(cfg.output_dir, "submission_xgboost.csv"), index=False)
-    print(f"   Saved: outputs/submission_xgboost.csv")
-    
-    # Save winner's submission
-    if winner == "xgboost":
-        sub_xgb.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
+    # Generate predictions from the model with best R² score
+    if xgb_r2 > pt_r2:
+        # XGBoost has better R² - use XGBoost predictions
+        best_preds = xgb_model.predict(X_test)
+        best_model_name = "XGBoost"
+        best_r2_score = xgb_r2
     else:
-        sub_pt.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
-    print(f"   Saved: outputs/submission.csv (using {winner})")
+        # PyTorch has better R² - use PyTorch predictions
+        best_preds = []
+        model.eval()
+        with torch.no_grad():
+            for img, tab, pid in te_loader:
+                img, tab = img.to(device), tab.to(device)
+                pred = model(img, tab).cpu().numpy()
+                best_preds.extend(pred.tolist())
+        best_model_name = "PyTorch"
+        best_r2_score = pt_r2
+    
+    # Save only the best model's submission
+    submission = pd.DataFrame({"id": test_ids, "predicted_price": best_preds})
+    submission.to_csv(os.path.join(cfg.output_dir, "submission.csv"), index=False)
+    print(f"   Saved: outputs/submission.csv (using {best_model_name} with R²: {best_r2_score:.4f})")
 
     # ==========================================
     # PHASE 6: GRAD-CAM VISUALIZATION
@@ -387,7 +367,8 @@ def main(args):
     
     print("\n" + "=" * 60)
     print("✅ TRAINING COMPLETE!")
-    print(f"   Winner: {winner.upper()} (R²: {xgb_r2:.4f if winner == 'xgboost' else pt_r2:.4f})")
+    winner_r2 = xgb_r2 if winner == 'xgboost' else pt_r2
+    print(f"   Winner: {winner.upper()} (R²: {winner_r2:.4f})")
     print("=" * 60)
     
     return winner, {
