@@ -127,8 +127,8 @@ python -m src.compare --predict
          └───────────┬───────────┘
                      │
               ┌──────▼──────┐
-              │  Concatenate │
-              │  320 features│
+              │ Concatenate │
+              │ 320 features│
               └──────┬──────┘
                      │
               ┌──────▼──────┐

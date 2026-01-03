@@ -1,7 +1,6 @@
 .venv/
 __pycache__/
 satellite/
-README/
 # Models
 models/*.pt
 models/*.pkl
